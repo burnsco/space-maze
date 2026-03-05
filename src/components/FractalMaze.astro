@@ -5,8 +5,10 @@
 		<p>WASD to move</p>
 		<p>Mouse to look</p>
 		<p>Reach the green beacon on level 5</p>
-		<p>Dark holes drop you down a level</p>
-		<p>Purple spheres lift you up a level</p>
+		<p>Red spheres drop you down a level</p>
+		<p>Green spheres lift you up a level</p>
+		<p>Fox enemy: touch damage only</p>
+		<p>Face enemy: shoots plasma bolts</p>
 		<p>Press SPACE at dead ends for hidden doors</p>
 		<p>ESC to release cursor</p>
 	</div>
@@ -14,6 +16,7 @@
 </div>
 <div id="ui">
 	<div id="status">Reach level 5 and find the exit beacon.</div>
+	<div id="health">Hits: 0/3</div>
 	<div id="debug">Position: (0.00, 0.00)</div>
 </div>
 
@@ -84,11 +87,39 @@
 	// @ts-nocheck
 	import * as THREE from 'three';
 	import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+	import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 	import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 	import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 	import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 	import { FilmPass } from 'three/examples/jsm/postprocessing/FilmPass.js';
 	import track1Url from '../music/track1.mp3?url';
+	import enemyModelUrl from '../models/Fox.glb?url';
+
+	function toAssetUrl(asset) {
+		if (!asset) return null;
+		if (typeof asset === 'string') return asset;
+		if (typeof asset === 'object') {
+			if (typeof asset.src === 'string') return asset.src;
+			if (typeof asset.default === 'string') return asset.default;
+			if (asset.default && typeof asset.default === 'object' && typeof asset.default.src === 'string') {
+				return asset.default.src;
+			}
+		}
+		return String(asset);
+	}
+
+	function sortAssetUrls(assets) {
+		return [...new Set(assets.map(toAssetUrl).filter(Boolean))].sort((a, b) =>
+			a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+		);
+	}
+
+	const FLOOR_TEXTURE_URLS = sortAssetUrls(
+		Object.values(import.meta.glob('../textures/floors/*.png', { eager: true, import: 'default' }))
+	);
+	const WALL_TEXTURE_URLS = sortAssetUrls(
+		Object.values(import.meta.glob('../textures/walls/**/*.png', { eager: true, import: 'default' }))
+	);
 
 	const MAZE_SIZE = 21;
 	const LEVEL_COUNT = 5;
@@ -108,6 +139,23 @@
 	const DROP_DEPTH = 3.5;
 	const DROP_SPEED = 12;
 	const SECRET_DOOR_TRIGGER_RADIUS = CELL_SIZE * 0.52;
+	const FOX_HEIGHT = 0.72;
+	const FACE_HEIGHT = 1.04;
+	const FOX_SPEED = 2.95;
+	const FACE_SPEED = 2.25;
+	const ENEMY_ACCEL = 8.4;
+	const ENEMY_ROTATE_SPEED = 9.5;
+	const ENEMY_REPATH_SECONDS = 0.33;
+	const FOX_CATCH_RADIUS = 0.95;
+	const FOX_CATCH_COOLDOWN = 1.8;
+	const FACE_SHOOT_INTERVAL = 1.25;
+	const FACE_SHOOT_RANGE = CELL_SIZE * 6.5;
+	const FACE_SHOOT_PATH_MAX = 12;
+	const PROJECTILE_RADIUS = 0.16;
+	const PROJECTILE_SPEED = 12;
+	const PROJECTILE_LIFETIME = 3.2;
+	const PLAYER_MAX_HITS = 3;
+	const PLAYER_HIT_COOLDOWN = 0.85;
 	const CARDINAL_DIRS = [
 		[1, 0],
 		[-1, 0],
@@ -132,12 +180,30 @@
 	let levelTransition = null;
 	let music;
 	let musicReady = false;
+	let textureLoader;
+	let gltfLoader;
 	let skyMaterial;
 	let skyLayer;
 	let planetMesh;
 	const starLayers = [];
 	const regionPulseMaterials = [];
-	const liftSphereMeshes = [];
+	const transitionSphereMeshes = [];
+	const textureCache = new Map();
+	const foxEnemy = createEnemyRuntime(FOX_HEIGHT);
+	const faceEnemy = createEnemyRuntime(FACE_HEIGHT);
+	let playerHits = 0;
+	let playerHitCooldown = 0;
+	let gameOver = false;
+	const projectileDirection = new THREE.Vector3();
+	const activeProjectiles = [];
+	const projectileGeometry = new THREE.SphereGeometry(PROJECTILE_RADIUS, 12, 12);
+	const projectileMaterial = new THREE.MeshStandardMaterial({
+		color: 0xff7355,
+		emissive: 0x912110,
+		emissiveIntensity: 1.1,
+		roughness: 0.3,
+		metalness: 0.08
+	});
 
 	const velocity = new THREE.Vector3();
 	const moveState = { forward: false, backward: false, left: false, right: false };
@@ -147,7 +213,28 @@
 
 	let debugEl;
 	let statusEl;
+	let healthEl;
 	let instructionsEl;
+	let startButtonEl;
+
+	function createEnemyRuntime(height) {
+		return {
+			height,
+			actor: null,
+			visual: null,
+			mixer: null,
+			currentLevel: -1,
+			catchCooldown: 0,
+			shootTimer: FACE_SHOOT_INTERVAL,
+			levelStates: [],
+			targetWorld: new THREE.Vector3(),
+			moveDirection: new THREE.Vector3(),
+			lookTarget: new THREE.Vector3(),
+			velocity: new THREE.Vector3(),
+			lookMatrix: new THREE.Matrix4(),
+			targetQuaternion: new THREE.Quaternion()
+		};
+	}
 
 	function createMaze(size) {
 		const grid = Array.from({ length: size }, () => Array(size).fill(1));
@@ -242,6 +329,34 @@
 		for (let i = array.length - 1; i > 0; i--) {
 			const j = Math.floor(Math.random() * (i + 1));
 			[array[i], array[j]] = [array[j], array[i]];
+		}
+	}
+
+	function pickLevelTextureUrl(urls, levelIndex, offset = 0) {
+		if (urls.length === 0) return null;
+		const stride = Math.max(1, Math.floor(urls.length / LEVEL_COUNT));
+		return urls[(levelIndex * stride + offset) % urls.length];
+	}
+
+	function getTexture(url, repeatX = 1, repeatY = 1) {
+		if (!url || !textureLoader) return null;
+		let texture = textureCache.get(url);
+		if (!texture) {
+			texture = textureLoader.load(url);
+			texture.colorSpace = THREE.SRGBColorSpace;
+			texture.wrapS = THREE.RepeatWrapping;
+			texture.wrapT = THREE.RepeatWrapping;
+			texture.anisotropy = renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+			textureCache.set(url, texture);
+		}
+		texture.repeat.set(repeatX, repeatY);
+		return texture;
+	}
+
+	function preloadLevelTextures() {
+		for (const levelData of levels) {
+			getTexture(levelData.floorTextureUrl, 5, 5);
+			getTexture(levelData.wallTextureUrl, 1, 1);
 		}
 	}
 
@@ -386,11 +501,15 @@
 			carveHugeRooms(grid, levelIndex);
 			return {
 				grid,
+				floorTextureUrl: pickLevelTextureUrl(FLOOR_TEXTURE_URLS, levelIndex, 7),
+				wallTextureUrl: pickLevelTextureUrl(WALL_TEXTURE_URLS, levelIndex, 13),
 				holeMap: new Map(),
 				sphereMap: new Map(),
 				secretDoors: [],
 				wallMeshes: new Map(),
-				reservedTransitions: new Set()
+				reservedTransitions: new Set(),
+				foxSpawn: { col: 1, row: 1 },
+				faceSpawn: { col: 1, row: 1 }
 			};
 		});
 
@@ -447,8 +566,132 @@
 			delete levels[level].reservedTransitions;
 		}
 
+		foxEnemy.levelStates.length = 0;
+		faceEnemy.levelStates.length = 0;
+		for (let level = 0; level < LEVEL_COUNT; level++) {
+			const spawnBlocks = new Set([...levels[level].holeMap.keys(), ...levels[level].sphereMap.keys()]);
+			spawnBlocks.add(cellKey(1, 1));
+			if (level === EXIT_LEVEL) spawnBlocks.add(cellKey(MAZE_SIZE - 2, MAZE_SIZE - 2));
+
+			const foxSpawn = pickEnemySpawnCell(level, spawnBlocks);
+			spawnBlocks.add(cellKey(foxSpawn.col, foxSpawn.row));
+			const faceSpawn = pickEnemySpawnCell(level, spawnBlocks);
+			levels[level].foxSpawn = foxSpawn;
+			levels[level].faceSpawn = faceSpawn;
+
+			foxEnemy.levelStates.push({
+				col: foxSpawn.col,
+				row: foxSpawn.row,
+				path: [],
+				pathIndex: 0,
+				targetCellKey: '',
+				repathTimer: 0
+			});
+			faceEnemy.levelStates.push({
+				col: faceSpawn.col,
+				row: faceSpawn.row,
+				path: [],
+				pathIndex: 0,
+				targetCellKey: '',
+				repathTimer: 0
+			});
+		}
+
 		currentLevel = 0;
 		exitPosition = cellToWorld(MAZE_SIZE - 2, MAZE_SIZE - 2);
+	}
+
+	function pickEnemySpawnCell(levelIndex, extraForbiddenCells = null) {
+		const grid = levels[levelIndex].grid;
+		const forbidden = new Set([...levels[levelIndex].holeMap.keys(), ...levels[levelIndex].sphereMap.keys()]);
+		if (extraForbiddenCells) {
+			for (const key of extraForbiddenCells) forbidden.add(key);
+		}
+		forbidden.add(cellKey(1, 1));
+		if (levelIndex === EXIT_LEVEL) forbidden.add(cellKey(MAZE_SIZE - 2, MAZE_SIZE - 2));
+
+		let best = null;
+		let bestScore = -Infinity;
+
+		for (let row = 1; row < MAZE_SIZE - 1; row++) {
+			for (let col = 1; col < MAZE_SIZE - 1; col++) {
+				if (grid[row][col] !== 0) continue;
+				const key = cellKey(col, row);
+				if (forbidden.has(key)) continue;
+
+				const distanceFromStart = Math.hypot(col - 1, row - 1);
+				if (distanceFromStart < MAZE_SIZE * 0.42) continue;
+				const distanceFromExit =
+					levelIndex === EXIT_LEVEL ? Math.hypot(col - (MAZE_SIZE - 2), row - (MAZE_SIZE - 2)) : MAZE_SIZE;
+				const score = distanceFromStart + distanceFromExit * 0.2 + Math.random() * 0.25;
+				if (score > bestScore) {
+					bestScore = score;
+					best = { col, row };
+				}
+			}
+		}
+
+		if (best) return best;
+		for (let row = 1; row < MAZE_SIZE - 1; row++) {
+			for (let col = 1; col < MAZE_SIZE - 1; col++) {
+				if (grid[row][col] !== 0) continue;
+				if (forbidden.has(cellKey(col, row))) continue;
+				return { col, row };
+			}
+		}
+		return { col: 1, row: 1 };
+	}
+
+	function keyToCell(key) {
+		const [col, row] = key.split(',').map((v) => Number.parseInt(v, 10));
+		return { col, row };
+	}
+
+	function findCellPath(grid, startCol, startRow, targetCol, targetRow) {
+		if (!inBounds(startCol, startRow) || !inBounds(targetCol, targetRow)) return [];
+		if (grid[startRow][startCol] !== 0 || grid[targetRow][targetCol] !== 0) return [];
+		if (startCol === targetCol && startRow === targetRow) return [];
+
+		const startKey = cellKey(startCol, startRow);
+		const targetKey = cellKey(targetCol, targetRow);
+		const queue = [{ col: startCol, row: startRow }];
+		const visited = new Set([startKey]);
+		const previous = new Map();
+		let found = false;
+		let cursor = 0;
+
+		while (cursor < queue.length) {
+			const current = queue[cursor++];
+			for (const [dx, dz] of CARDINAL_DIRS) {
+				const nextCol = current.col + dx;
+				const nextRow = current.row + dz;
+				if (!inBounds(nextCol, nextRow)) continue;
+				if (grid[nextRow][nextCol] !== 0) continue;
+
+				const nextKey = cellKey(nextCol, nextRow);
+				if (visited.has(nextKey)) continue;
+				visited.add(nextKey);
+				previous.set(nextKey, cellKey(current.col, current.row));
+
+				if (nextKey === targetKey) {
+					found = true;
+					cursor = queue.length;
+					break;
+				}
+				queue.push({ col: nextCol, row: nextRow });
+			}
+		}
+
+		if (!found) return [];
+		const path = [];
+		let walkKey = targetKey;
+		while (walkKey !== startKey) {
+			path.push(keyToCell(walkKey));
+			walkKey = previous.get(walkKey);
+			if (!walkKey) return [];
+		}
+		path.reverse();
+		return path;
 	}
 
 	function getRegionIndex(col, row) {
@@ -461,7 +704,7 @@
 	function buildMazeScene(levelIndex) {
 		if (mazeGroup) scene.remove(mazeGroup);
 		regionPulseMaterials.length = 0;
-		liftSphereMeshes.length = 0;
+		transitionSphereMeshes.length = 0;
 
 		mazeGroup = new THREE.Group();
 		const levelData = levels[levelIndex];
@@ -470,6 +713,8 @@
 		const worldSize = MAZE_SIZE * CELL_SIZE;
 		const sectionSize = worldSize / 2;
 		const sectionOffset = worldSize * 0.25;
+		const floorTexture = getTexture(levelData.floorTextureUrl, sectionSize / CELL_SIZE, sectionSize / CELL_SIZE);
+		const wallTexture = getTexture(levelData.wallTextureUrl, 1, 1);
 		const sectionConfigs = isLowerLevel
 			? [
 					{ floor: 0x3a415a, wall: 0x8f9ebc, edge: 0x9fc0ff },
@@ -490,13 +735,14 @@
 				const sectionIndex = colSection + rowSection * 2;
 				const config = sectionConfigs[sectionIndex];
 				const floorMaterial = new THREE.MeshStandardMaterial({
-					color: config.floor,
-					emissive: config.floor,
-					emissiveIntensity: 0.075,
-					roughness: 0.92,
+					map: floorTexture,
+					color: floorTexture ? 0xffffff : config.floor,
+					emissive: floorTexture ? 0x181f2d : config.floor,
+					emissiveIntensity: floorTexture ? 0.04 : 0.075,
+					roughness: floorTexture ? 0.95 : 0.92,
 					metalness: 0.03
 				});
-				floorMaterial.userData.baseEmissive = 0.075;
+				floorMaterial.userData.baseEmissive = floorTexture ? 0.04 : 0.075;
 				floorMaterial.userData.pulseAmp = 0.03;
 				const floor = new THREE.Mesh(floorGeometry, floorMaterial);
 				floor.rotation.x = -Math.PI / 2;
@@ -530,14 +776,15 @@
 		const wallGeometry = new THREE.BoxGeometry(CELL_SIZE, WALL_HEIGHT, CELL_SIZE);
 		const wallMaterials = sectionConfigs.map((config) => {
 			const material = new THREE.MeshStandardMaterial({
-				color: config.wall,
+				map: wallTexture,
+				color: wallTexture ? 0xffffff : config.wall,
 				emissive: config.edge,
-				emissiveIntensity: 0.12,
-				roughness: 0.72,
-				metalness: 0.16
+				emissiveIntensity: wallTexture ? 0.08 : 0.12,
+				roughness: wallTexture ? 0.87 : 0.72,
+				metalness: wallTexture ? 0.04 : 0.16
 			});
-			material.userData.baseEmissive = 0.12;
-			material.userData.pulseAmp = 0.07;
+			material.userData.baseEmissive = wallTexture ? 0.08 : 0.12;
+			material.userData.pulseAmp = wallTexture ? 0.04 : 0.07;
 			regionPulseMaterials.push(material);
 			return material;
 		});
@@ -554,51 +801,53 @@
 		}
 
 		if (levelData.holeMap.size > 0) {
-			const pitMaterial = new THREE.MeshStandardMaterial({
-				color: 0x070b14,
-				roughness: 0.32,
-				metalness: 0.2,
+			const dropMaterial = new THREE.MeshStandardMaterial({
+				color: 0xff4a3a,
+				emissive: 0x7a1710,
+				emissiveIntensity: 1.05,
+				roughness: 0.34,
+				metalness: 0.14
+			});
+			const auraMaterial = new THREE.MeshBasicMaterial({
+				color: 0xff8a80,
+				transparent: true,
+				opacity: 0.26,
 				side: THREE.DoubleSide
 			});
-			const rimMaterial = new THREE.MeshStandardMaterial({
-				color: 0x415784,
-				roughness: 0.52,
-				metalness: 0.22
-			});
-			const pitGeometry = new THREE.CylinderGeometry(HOLE_RADIUS, HOLE_RADIUS * 1.1, 2.2, 24, 1, true);
-			const rimGeometry = new THREE.TorusGeometry(HOLE_RADIUS * 1.02, 0.1, 10, 22);
-			const capGeometry = new THREE.CircleGeometry(HOLE_RADIUS * 0.94, 24);
-			const capMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, opacity: 0.9, transparent: true });
+			const sphereGeometry = new THREE.SphereGeometry(HOLE_RADIUS * 0.82, 22, 22);
+			const auraGeometry = new THREE.RingGeometry(HOLE_RADIUS * 1.05, HOLE_RADIUS * 1.6, 30);
 
 			for (const hole of levelData.holeMap.values()) {
 				const p = cellToWorld(hole.col, hole.row);
+				const orb = new THREE.Mesh(sphereGeometry, dropMaterial);
+				const baseY = 0.72;
+				orb.position.set(p.x, baseY, p.z);
+				mazeGroup.add(orb);
 
-				const pit = new THREE.Mesh(pitGeometry, pitMaterial);
-				pit.position.set(p.x, -0.95, p.z);
-				mazeGroup.add(pit);
+				const aura = new THREE.Mesh(auraGeometry, auraMaterial);
+				aura.rotation.x = -Math.PI / 2;
+				aura.position.set(p.x, 0.1, p.z);
+				mazeGroup.add(aura);
 
-				const cap = new THREE.Mesh(capGeometry, capMaterial);
-				cap.rotation.x = -Math.PI / 2;
-				cap.position.set(p.x, 0.02, p.z);
-				mazeGroup.add(cap);
-
-				const rim = new THREE.Mesh(rimGeometry, rimMaterial);
-				rim.rotation.x = Math.PI / 2;
-				rim.position.set(p.x, 0.07, p.z);
-				mazeGroup.add(rim);
+				transitionSphereMeshes.push({
+					orb,
+					aura,
+					baseY,
+					phase: Math.random() * Math.PI * 2
+				});
 			}
 		}
 
 		if (levelData.sphereMap.size > 0) {
 			const liftMaterial = new THREE.MeshStandardMaterial({
-				color: 0x8c56ff,
-				emissive: 0x4f1eb2,
+				color: 0x55ff8f,
+				emissive: 0x1f8b43,
 				emissiveIntensity: 1.1,
 				roughness: 0.35,
 				metalness: 0.12
 			});
 			const auraMaterial = new THREE.MeshBasicMaterial({
-				color: 0xcbb0ff,
+				color: 0xb8ffd1,
 				transparent: true,
 				opacity: 0.3,
 				side: THREE.DoubleSide
@@ -618,7 +867,7 @@
 				aura.position.set(p.x, 0.1, p.z);
 				mazeGroup.add(aura);
 
-				liftSphereMeshes.push({
+				transitionSphereMeshes.push({
 					orb,
 					aura,
 					baseY,
@@ -835,6 +1084,8 @@
 			if ((goingDown && camera.position.y <= outTargetY) || (!goingDown && camera.position.y >= outTargetY)) {
 				currentLevel = levelTransition.targetLevel;
 				buildMazeScene(currentLevel);
+				clearProjectiles();
+				syncEnemiesForCurrentLevel(true);
 				camera.position.y = outTargetY;
 				levelTransition.switchedLevel = true;
 			}
@@ -849,7 +1100,7 @@
 		}
 	}
 
-	function maybeDropThroughHole() {
+	function maybeDropThroughDropSphere() {
 		if (levelTransition) return;
 
 		const { col, row } = worldToCell(camera.position.x, camera.position.z);
@@ -914,6 +1165,404 @@
 		camera.position.y = PLAYER_HEIGHT;
 	}
 
+	function createFallbackFoxVisual() {
+		const group = new THREE.Group();
+		const body = new THREE.Mesh(
+			new THREE.CapsuleGeometry(0.3, 0.9, 8, 14),
+			new THREE.MeshStandardMaterial({
+				color: 0xff9a64,
+				emissive: 0x55230f,
+				emissiveIntensity: 0.35,
+				roughness: 0.55,
+				metalness: 0.1
+			})
+		);
+		const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0xfff1dc });
+		const leftEye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 10), eyeMaterial);
+		const rightEye = leftEye.clone();
+		leftEye.position.set(-0.12, 0.64, 0.23);
+		rightEye.position.set(0.12, 0.64, 0.23);
+		group.add(body, leftEye, rightEye);
+		return group;
+	}
+
+	function createFaceEnemyVisual() {
+		const group = new THREE.Group();
+		const face = new THREE.Mesh(
+			new THREE.SphereGeometry(0.72, 26, 24),
+			new THREE.MeshStandardMaterial({
+				color: 0x8fd9ff,
+				emissive: 0x1b4f69,
+				emissiveIntensity: 0.52,
+				roughness: 0.4,
+				metalness: 0.2
+			})
+		);
+		const eyeGeometry = new THREE.SphereGeometry(0.1, 10, 10);
+		const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x072a3a });
+		const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+		const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+		leftEye.position.set(-0.21, 0.14, 0.62);
+		rightEye.position.set(0.21, 0.14, 0.62);
+		const mouth = new THREE.Mesh(
+			new THREE.TorusGeometry(0.22, 0.04, 8, 18, Math.PI),
+			new THREE.MeshBasicMaterial({ color: 0x0f2a37 })
+		);
+		mouth.position.set(0, -0.22, 0.62);
+		mouth.rotation.z = Math.PI;
+		group.add(face, leftEye, rightEye, mouth);
+		return group;
+	}
+
+	function initEnemies() {
+		foxEnemy.actor = new THREE.Group();
+		foxEnemy.actor.visible = false;
+		foxEnemy.visual = createFallbackFoxVisual();
+		foxEnemy.actor.add(foxEnemy.visual);
+		scene.add(foxEnemy.actor);
+
+		faceEnemy.actor = new THREE.Group();
+		faceEnemy.actor.visible = false;
+		faceEnemy.visual = createFaceEnemyVisual();
+		faceEnemy.actor.add(faceEnemy.visual);
+		scene.add(faceEnemy.actor);
+	}
+
+	function clearProjectiles() {
+		for (const projectile of activeProjectiles) {
+			scene.remove(projectile.mesh);
+		}
+		activeProjectiles.length = 0;
+	}
+
+	function endGame() {
+		gameOver = true;
+		clearProjectiles();
+		statusEl.textContent = 'Game over. The fox and face got you. Press ENTER MAZE to restart.';
+		startButtonEl.textContent = 'ENTER MAZE';
+		if (controls?.isLocked) controls.unlock();
+		setMusicPlaying(false);
+	}
+
+	function registerPlayerHit(reason) {
+		if (gameOver || playerHitCooldown > 0) return false;
+		playerHitCooldown = PLAYER_HIT_COOLDOWN;
+		playerHits++;
+		if (playerHits >= PLAYER_MAX_HITS) {
+			endGame();
+			return true;
+		}
+
+		if (reason === 'fox-touch') {
+			resetPlayerToLevelStart();
+			resetEnemiesForLevel(currentLevel);
+			clearProjectiles();
+		}
+		statusEl.textContent = `You were hit (${playerHits}/${PLAYER_MAX_HITS}).`;
+		return true;
+	}
+
+	function spawnFaceProjectile() {
+		if (!faceEnemy.actor || gameOver) return;
+		projectileDirection.set(camera.position.x - faceEnemy.actor.position.x, 0, camera.position.z - faceEnemy.actor.position.z);
+		if (projectileDirection.lengthSq() < 0.0001) return;
+		projectileDirection.normalize();
+
+		const mesh = new THREE.Mesh(projectileGeometry, projectileMaterial);
+		mesh.position.set(
+			faceEnemy.actor.position.x + projectileDirection.x * 0.7,
+			faceEnemy.height + 0.25,
+			faceEnemy.actor.position.z + projectileDirection.z * 0.7
+		);
+		scene.add(mesh);
+		activeProjectiles.push({
+			level: currentLevel,
+			ttl: PROJECTILE_LIFETIME,
+			mesh,
+			velocity: new THREE.Vector3(
+				projectileDirection.x * PROJECTILE_SPEED,
+				0,
+				projectileDirection.z * PROJECTILE_SPEED
+			)
+		});
+	}
+
+	function removeProjectile(index) {
+		const projectile = activeProjectiles[index];
+		if (!projectile) return;
+		scene.remove(projectile.mesh);
+		activeProjectiles.splice(index, 1);
+	}
+
+	function updateProjectiles(delta) {
+		for (let i = activeProjectiles.length - 1; i >= 0; i--) {
+			const projectile = activeProjectiles[i];
+			if (projectile.level !== currentLevel) {
+				removeProjectile(i);
+				continue;
+			}
+
+			projectile.ttl -= delta;
+			if (projectile.ttl <= 0) {
+				removeProjectile(i);
+				continue;
+			}
+
+			projectile.mesh.position.addScaledVector(projectile.velocity, delta);
+
+			if (!isOpenAt(projectile.mesh.position.x, projectile.mesh.position.z)) {
+				removeProjectile(i);
+				continue;
+			}
+
+			const dx = camera.position.x - projectile.mesh.position.x;
+			const dz = camera.position.z - projectile.mesh.position.z;
+			const hitRadius = PROJECTILE_RADIUS + PLAYER_RADIUS * 0.75;
+			if (dx * dx + dz * dz > hitRadius * hitRadius) continue;
+			removeProjectile(i);
+			registerPlayerHit('projectile');
+		}
+	}
+
+	function loadFoxModel() {
+		if (!gltfLoader) return;
+		gltfLoader.load(
+			enemyModelUrl,
+			(gltf) => {
+				if (!foxEnemy.actor) return;
+				if (foxEnemy.visual) foxEnemy.actor.remove(foxEnemy.visual);
+				foxEnemy.mixer = null;
+
+				const model = gltf.scene;
+				model.scale.setScalar(0.022);
+				model.position.y = -0.68;
+				model.traverse((child) => {
+					if (!child.isMesh) return;
+					child.castShadow = false;
+					child.receiveShadow = false;
+				});
+				foxEnemy.visual = model;
+				foxEnemy.actor.add(foxEnemy.visual);
+
+				if (gltf.animations.length > 0) {
+					foxEnemy.mixer = new THREE.AnimationMixer(model);
+					const clip =
+						gltf.animations.find((animation) => /run|walk/i.test(animation.name)) ?? gltf.animations[0];
+					foxEnemy.mixer.clipAction(clip).play();
+				}
+			},
+			undefined,
+			() => {
+				// Keep fallback visual when model load fails.
+			}
+		);
+	}
+
+	function syncEnemyForCurrentLevel(enemy, spawnKey, forceResetPath = false) {
+		if (!enemy.actor || !enemy.levelStates[currentLevel]) return;
+		const levelState = enemy.levelStates[currentLevel];
+		if (forceResetPath) {
+			levelState.path = [];
+			levelState.pathIndex = 0;
+			levelState.targetCellKey = '';
+			levelState.repathTimer = 0;
+		}
+		const levelSpawn = levels[currentLevel]?.[spawnKey];
+		if (forceResetPath && levelSpawn) {
+			levelState.col = levelSpawn.col;
+			levelState.row = levelSpawn.row;
+		}
+		const spawnWorld = cellToWorld(levelState.col, levelState.row);
+		enemy.actor.position.set(spawnWorld.x, enemy.height, spawnWorld.z);
+		enemy.actor.visible = true;
+		enemy.velocity.set(0, 0, 0);
+		enemy.currentLevel = currentLevel;
+	}
+
+	function syncEnemiesForCurrentLevel(forceResetPath = false) {
+		syncEnemyForCurrentLevel(foxEnemy, 'foxSpawn', forceResetPath);
+		syncEnemyForCurrentLevel(faceEnemy, 'faceSpawn', forceResetPath);
+		faceEnemy.shootTimer = FACE_SHOOT_INTERVAL * (0.65 + Math.random() * 0.5);
+	}
+
+	function resetPlayerToLevelStart() {
+		const start = cellToWorld(1, 1);
+		camera.position.set(start.x, PLAYER_HEIGHT, start.z);
+		velocity.set(0, 0, 0);
+	}
+
+	function resetEnemyForLevel(enemy, levelIndex, spawnKey) {
+		const levelState = enemy.levelStates[levelIndex];
+		if (!levelState) return;
+		const spawn = levels[levelIndex][spawnKey] ?? { col: MAZE_SIZE - 2, row: 1 };
+		levelState.col = spawn.col;
+		levelState.row = spawn.row;
+		levelState.path = [];
+		levelState.pathIndex = 0;
+		levelState.targetCellKey = '';
+		levelState.repathTimer = 0;
+		if (enemy.actor && enemy.currentLevel === levelIndex) {
+			const p = cellToWorld(spawn.col, spawn.row);
+			enemy.actor.position.set(p.x, enemy.height, p.z);
+			enemy.velocity.set(0, 0, 0);
+		}
+	}
+
+	function resetEnemiesForLevel(levelIndex) {
+		resetEnemyForLevel(foxEnemy, levelIndex, 'foxSpawn');
+		resetEnemyForLevel(faceEnemy, levelIndex, 'faceSpawn');
+	}
+
+	function resetRun() {
+		gameOver = false;
+		playerHits = 0;
+		playerHitCooldown = 0;
+		foxEnemy.catchCooldown = 0;
+		faceEnemy.shootTimer = FACE_SHOOT_INTERVAL;
+		clearProjectiles();
+		buildLevels();
+		preloadLevelTextures();
+		buildMazeScene(currentLevel);
+		syncEnemiesForCurrentLevel(true);
+		resetPlayerToLevelStart();
+	}
+
+	function updateEnemyChase(enemy, levelState, grid, targetCell, delta, speed) {
+		levelState.repathTimer -= delta;
+		const targetKey = cellKey(targetCell.col, targetCell.row);
+		if (
+			levelState.repathTimer <= 0 ||
+			levelState.targetCellKey !== targetKey ||
+			levelState.pathIndex >= levelState.path.length
+		) {
+			levelState.path = findCellPath(grid, levelState.col, levelState.row, targetCell.col, targetCell.row);
+			levelState.pathIndex = 0;
+			levelState.targetCellKey = targetKey;
+			levelState.repathTimer = ENEMY_REPATH_SECONDS;
+		}
+
+		if (levelState.pathIndex < levelState.path.length) {
+			const waypoint = levelState.path[levelState.pathIndex];
+			const waypointWorld = cellToWorld(waypoint.col, waypoint.row);
+			enemy.targetWorld.set(waypointWorld.x, enemy.height, waypointWorld.z);
+			enemy.moveDirection.subVectors(enemy.targetWorld, enemy.actor.position);
+			enemy.moveDirection.y = 0;
+			const distance = enemy.moveDirection.length();
+
+			if (distance <= 0.06) {
+				enemy.actor.position.x = enemy.targetWorld.x;
+				enemy.actor.position.z = enemy.targetWorld.z;
+				enemy.velocity.set(0, 0, 0);
+				levelState.col = waypoint.col;
+				levelState.row = waypoint.row;
+				levelState.pathIndex++;
+			} else {
+				enemy.moveDirection.divideScalar(distance);
+				enemy.velocity.lerp(enemy.moveDirection.multiplyScalar(speed), Math.min(1, ENEMY_ACCEL * delta));
+				const stepX = enemy.velocity.x * delta;
+				const stepZ = enemy.velocity.z * delta;
+				enemy.actor.position.x += stepX;
+				enemy.actor.position.z += stepZ;
+			}
+		} else {
+			enemy.velocity.multiplyScalar(Math.max(0, 1 - ENEMY_ACCEL * delta));
+		}
+
+		if (enemy.velocity.lengthSq() > 0.0004) {
+			enemy.lookTarget.set(
+				enemy.actor.position.x + enemy.velocity.x,
+				enemy.actor.position.y,
+				enemy.actor.position.z + enemy.velocity.z
+			);
+			enemy.lookMatrix.lookAt(enemy.actor.position, enemy.lookTarget, Y_AXIS);
+			enemy.targetQuaternion.setFromRotationMatrix(enemy.lookMatrix);
+			enemy.actor.quaternion.slerp(enemy.targetQuaternion, Math.min(1, ENEMY_ROTATE_SPEED * delta));
+		}
+	}
+
+	function updateFoxEnemy(delta, elapsedTime) {
+		if (!foxEnemy.actor) return;
+		if (foxEnemy.mixer) {
+			foxEnemy.mixer.update(delta);
+		} else if (foxEnemy.actor.visible) {
+			foxEnemy.actor.position.y = foxEnemy.height + Math.sin(elapsedTime * 4.8) * 0.035;
+		}
+
+		if (foxEnemy.currentLevel !== currentLevel) {
+			syncEnemyForCurrentLevel(foxEnemy, 'foxSpawn', true);
+		}
+
+		if (!controls?.isLocked || levelTransition || gameOver) return;
+		if (foxEnemy.catchCooldown > 0) foxEnemy.catchCooldown = Math.max(0, foxEnemy.catchCooldown - delta);
+		const levelState = foxEnemy.levelStates[currentLevel];
+		if (!levelState) return;
+		const grid = getCurrentGrid();
+		const enemyCell = worldToCell(foxEnemy.actor.position.x, foxEnemy.actor.position.z);
+		if (inBounds(enemyCell.col, enemyCell.row) && grid[enemyCell.row][enemyCell.col] === 0) {
+			levelState.col = enemyCell.col;
+			levelState.row = enemyCell.row;
+		}
+
+		const playerCell = worldToCell(camera.position.x, camera.position.z);
+		if (!inBounds(playerCell.col, playerCell.row) || grid[playerCell.row][playerCell.col] !== 0) return;
+
+		updateEnemyChase(foxEnemy, levelState, grid, playerCell, delta, FOX_SPEED);
+		const dx = camera.position.x - foxEnemy.actor.position.x;
+		const dz = camera.position.z - foxEnemy.actor.position.z;
+		if (foxEnemy.catchCooldown > 0) return;
+		if (dx * dx + dz * dz > FOX_CATCH_RADIUS * FOX_CATCH_RADIUS) return;
+
+		foxEnemy.catchCooldown = FOX_CATCH_COOLDOWN;
+		registerPlayerHit('fox-touch');
+	}
+
+	function updateFaceEnemy(delta, elapsedTime) {
+		if (!faceEnemy.actor) return;
+		if (faceEnemy.actor.visible) {
+			faceEnemy.actor.position.y = faceEnemy.height + Math.sin(elapsedTime * 3.2) * 0.075;
+			if (faceEnemy.visual) faceEnemy.visual.rotation.z = Math.sin(elapsedTime * 1.7) * 0.05;
+		}
+
+		if (faceEnemy.currentLevel !== currentLevel) {
+			syncEnemyForCurrentLevel(faceEnemy, 'faceSpawn', true);
+			faceEnemy.shootTimer = FACE_SHOOT_INTERVAL * (0.65 + Math.random() * 0.5);
+		}
+
+		if (!controls?.isLocked || levelTransition || gameOver) return;
+		const levelState = faceEnemy.levelStates[currentLevel];
+		if (!levelState) return;
+		const grid = getCurrentGrid();
+		const enemyCell = worldToCell(faceEnemy.actor.position.x, faceEnemy.actor.position.z);
+		if (inBounds(enemyCell.col, enemyCell.row) && grid[enemyCell.row][enemyCell.col] === 0) {
+			levelState.col = enemyCell.col;
+			levelState.row = enemyCell.row;
+		}
+
+		const playerCell = worldToCell(camera.position.x, camera.position.z);
+		if (!inBounds(playerCell.col, playerCell.row) || grid[playerCell.row][playerCell.col] !== 0) return;
+
+		updateEnemyChase(faceEnemy, levelState, grid, playerCell, delta, FACE_SPEED);
+		faceEnemy.shootTimer -= delta;
+		const playerDistance = Math.hypot(
+			camera.position.x - faceEnemy.actor.position.x,
+			camera.position.z - faceEnemy.actor.position.z
+		);
+		if (
+			faceEnemy.shootTimer <= 0 &&
+			playerDistance <= FACE_SHOOT_RANGE &&
+			levelState.path.length > 0 &&
+			levelState.path.length <= FACE_SHOOT_PATH_MAX
+		) {
+			spawnFaceProjectile();
+			faceEnemy.shootTimer = FACE_SHOOT_INTERVAL * (0.75 + Math.random() * 0.4);
+		}
+	}
+
+	function updateEnemies(delta, elapsedTime) {
+		updateFoxEnemy(delta, elapsedTime);
+		updateFaceEnemy(delta, elapsedTime);
+	}
+
 	function updateUi() {
 		const { col, row } = worldToCell(camera.position.x, camera.position.z);
 		const atExitLevel = currentLevel === EXIT_LEVEL;
@@ -922,10 +1571,16 @@
 			: Infinity;
 
 		debugEl.textContent = `Level: ${currentLevel + 1}/${LEVEL_COUNT} | Position: (${camera.position.x.toFixed(2)}, ${camera.position.z.toFixed(2)}) Cell: (${col}, ${row})`;
+		healthEl.textContent = `Hits: ${playerHits}/${PLAYER_MAX_HITS}`;
 
 		if (levelTransition) {
 			const directionLabel = levelTransition.direction === 'down' ? 'Dropping' : 'Rising';
 			statusEl.textContent = `${directionLabel} to level ${levelTransition.targetLevel + 1}...`;
+			return;
+		}
+
+		if (gameOver) {
+			statusEl.textContent = 'Game over. Press ENTER MAZE to restart.';
 			return;
 		}
 
@@ -935,16 +1590,16 @@
 		}
 
 		if (currentLevel === 0) {
-			statusEl.textContent = 'Top level: find holes to drop. Press SPACE at dead ends for hidden doors.';
+			statusEl.textContent = 'Top level: find red spheres to drop. Press SPACE at dead ends for hidden doors.';
 			return;
 		}
 
 		if (currentLevel === EXIT_LEVEL) {
-			statusEl.textContent = 'Final level: no holes below here. Find the green exit beacon.';
+			statusEl.textContent = 'Final level: avoid the fox and face, then find the green exit beacon.';
 			return;
 		}
 
-		statusEl.textContent = 'Use holes to go down and purple spheres to go up. SPACE can reveal dead-end doors.';
+		statusEl.textContent = 'Use red spheres to go down, green to go up, and avoid the fox and face.';
 	}
 
 	function setMusicPlaying(shouldPlay) {
@@ -981,12 +1636,12 @@
 		}
 	}
 
-	function updateLiftSpheres(elapsedTime) {
-		for (const liftSphere of liftSphereMeshes) {
-			liftSphere.orb.position.y = liftSphere.baseY + Math.sin(elapsedTime * 2.2 + liftSphere.phase) * 0.14;
-			liftSphere.orb.rotation.y += 0.02;
-			liftSphere.aura.rotation.z += 0.012;
-			liftSphere.aura.material.opacity = 0.22 + Math.sin(elapsedTime * 3 + liftSphere.phase) * 0.08;
+	function updateTransitionSpheres(elapsedTime) {
+		for (const sphere of transitionSphereMeshes) {
+			sphere.orb.position.y = sphere.baseY + Math.sin(elapsedTime * 2.2 + sphere.phase) * 0.14;
+			sphere.orb.rotation.y += 0.02;
+			sphere.aura.rotation.z += 0.012;
+			sphere.aura.material.opacity = 0.22 + Math.sin(elapsedTime * 3 + sphere.phase) * 0.08;
 		}
 	}
 
@@ -994,28 +1649,34 @@
 		requestAnimationFrame(animate);
 		const delta = clock.getDelta();
 		const elapsedTime = clock.elapsedTime;
+		if (playerHitCooldown > 0) playerHitCooldown = Math.max(0, playerHitCooldown - delta);
 
-		if (controls.isLocked) {
+		if (controls.isLocked && !gameOver) {
 			if (!levelTransition) {
 				updateMovement(delta);
-				maybeDropThroughHole();
+				maybeDropThroughDropSphere();
 				maybeRiseThroughSphere();
 			}
 			updateLevelTransition(delta);
 		}
 
+		updateEnemies(delta, elapsedTime);
+		if (controls.isLocked && !levelTransition && !gameOver) {
+			updateProjectiles(delta);
+		}
 		updateSky(elapsedTime, delta);
 		updateRegionPulses(elapsedTime);
-		updateLiftSpheres(elapsedTime);
+		updateTransitionSpheres(elapsedTime);
 		updateUi();
 		composer.render(delta);
 	}
 
 	function init() {
 		const container = document.getElementById('canvas-container');
-		const startButton = document.getElementById('start-btn');
+		startButtonEl = document.getElementById('start-btn');
 		debugEl = document.getElementById('debug');
 		statusEl = document.getElementById('status');
+		healthEl = document.getElementById('health');
 		instructionsEl = document.getElementById('instructions');
 
 		scene = new THREE.Scene();
@@ -1029,6 +1690,8 @@
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		renderer.setSize(window.innerWidth, window.innerHeight);
 		container.appendChild(renderer.domElement);
+		textureLoader = new THREE.TextureLoader();
+		gltfLoader = new GLTFLoader();
 
 		composer = new EffectComposer(renderer);
 		composer.addPass(new RenderPass(scene, camera));
@@ -1043,7 +1706,10 @@
 		music.preload = 'auto';
 
 		controls = new PointerLockControls(camera, document.body);
-		startButton.addEventListener('click', () => {
+		startButtonEl.addEventListener('click', () => {
+			if (gameOver) {
+				resetRun();
+			}
 			if (!musicReady) {
 				music.load();
 				musicReady = true;
@@ -1073,12 +1739,10 @@
 		fill.position.set(-28, 24, -30);
 		scene.add(fill);
 
-		buildLevels();
 		addSkyBackdrop();
-		buildMazeScene(currentLevel);
-
-		const start = cellToWorld(1, 1);
-		camera.position.set(start.x, PLAYER_HEIGHT, start.z);
+		initEnemies();
+		loadFoxModel();
+		resetRun();
 
 		document.addEventListener('keydown', onKeyDown);
 		document.addEventListener('keyup', onKeyUp);
