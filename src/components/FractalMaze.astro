@@ -1,0 +1,462 @@
+<div id="canvas-container"></div>
+<div id="instructions">
+	<div class="title">SPACE MAZE</div>
+	<div class="controls">
+		<p>WASD to move</p>
+		<p>Mouse to look</p>
+		<p>Reach the green beacon</p>
+		<p>ESC to release cursor</p>
+	</div>
+	<button id="start-btn">ENTER MAZE</button>
+</div>
+<div id="ui">
+	<div id="status">Find the exit beacon.</div>
+	<div id="debug">Position: (0.00, 0.00)</div>
+</div>
+
+<style>
+	#canvas-container {
+		position: fixed;
+		inset: 0;
+		background: radial-gradient(circle at 50% 12%, #d2ecff 0%, #9ec7ef 42%, #5e82af 100%);
+	}
+
+	#instructions {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		text-align: center;
+		background: rgba(0, 0, 0, 0.8);
+		padding: 2rem;
+		border: 1px solid #4cf6cf;
+		border-radius: 10px;
+		z-index: 100;
+		pointer-events: auto;
+	}
+
+	.title {
+		font-size: 2.5rem;
+		font-weight: bold;
+		color: #4cf6cf;
+		margin-bottom: 1rem;
+		letter-spacing: 0.14rem;
+	}
+
+	.controls {
+		margin-bottom: 2rem;
+		color: #9eb6c7;
+	}
+
+	#start-btn {
+		background: transparent;
+		color: #4cf6cf;
+		border: 2px solid #4cf6cf;
+		padding: 1rem 2rem;
+		font-size: 1.2rem;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	#start-btn:hover {
+		background: #4cf6cf;
+		color: #000;
+	}
+
+	#ui {
+		position: fixed;
+		bottom: 20px;
+		left: 20px;
+		color: #163152;
+		font-family: monospace;
+		background: rgba(247, 252, 255, 0.75);
+		border: 1px solid rgba(74, 126, 179, 0.45);
+		border-radius: 8px;
+		padding: 0.65rem 0.8rem;
+		pointer-events: none;
+	}
+</style>
+
+<script>
+	// @ts-nocheck
+	import * as THREE from 'three';
+	import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+
+	const MAZE_SIZE = 21;
+	const CELL_SIZE = 4;
+	const WALL_HEIGHT = 3.4;
+	const PLAYER_HEIGHT = 1.6;
+	const PLAYER_RADIUS = 0.35;
+	const MOVE_ACCEL = 120;
+	const MOVE_DAMPING = 10;
+	const FINISH_DISTANCE = 1.6;
+	const Y_AXIS = new THREE.Vector3(0, 1, 0);
+	const HALF_WORLD = (MAZE_SIZE * CELL_SIZE) / 2;
+
+	let scene;
+	let camera;
+	let renderer;
+	let controls;
+	let clock;
+	let maze = [];
+	let exitPosition = new THREE.Vector3();
+
+	const velocity = new THREE.Vector3();
+	const moveState = { forward: false, backward: false, left: false, right: false };
+	const forward = new THREE.Vector3();
+	const right = new THREE.Vector3();
+	const moveIntent = new THREE.Vector3();
+
+	let debugEl;
+	let statusEl;
+	let instructionsEl;
+
+	function createMaze(size) {
+		const grid = Array.from({ length: size }, () => Array(size).fill(1));
+		const stack = [[1, 1]];
+		const stepDirs = [
+			[2, 0],
+			[-2, 0],
+			[0, 2],
+			[0, -2]
+		];
+
+		grid[1][1] = 0;
+
+		while (stack.length > 0) {
+			const [x, z] = stack[stack.length - 1];
+			const choices = [];
+
+			for (const [dx, dz] of stepDirs) {
+				const nx = x + dx;
+				const nz = z + dz;
+				if (nx <= 0 || nz <= 0 || nx >= size - 1 || nz >= size - 1) continue;
+				if (grid[nz][nx] !== 1) continue;
+				choices.push([nx, nz, x + dx / 2, z + dz / 2]);
+			}
+
+			if (choices.length === 0) {
+				stack.pop();
+				continue;
+			}
+
+			const [nx, nz, wx, wz] = choices[Math.floor(Math.random() * choices.length)];
+			grid[wz][wx] = 0;
+			grid[nz][nx] = 0;
+			stack.push([nx, nz]);
+		}
+
+		grid[1][1] = 0;
+		grid[size - 2][size - 2] = 0;
+		return grid;
+	}
+
+	function cellToWorld(col, row) {
+		return new THREE.Vector3(
+			col * CELL_SIZE - HALF_WORLD + CELL_SIZE * 0.5,
+			0,
+			row * CELL_SIZE - HALF_WORLD + CELL_SIZE * 0.5
+		);
+	}
+
+	function worldToCell(x, z) {
+		return {
+			col: Math.floor((x + HALF_WORLD) / CELL_SIZE),
+			row: Math.floor((z + HALF_WORLD) / CELL_SIZE)
+		};
+	}
+
+	function inBounds(col, row) {
+		return col >= 0 && row >= 0 && col < MAZE_SIZE && row < MAZE_SIZE;
+	}
+
+	function isOpenAt(x, z) {
+		const { col, row } = worldToCell(x, z);
+		if (!inBounds(col, row)) return false;
+		return maze[row][col] === 0;
+	}
+
+	function canOccupy(x, z) {
+		const r = PLAYER_RADIUS;
+		return (
+			isOpenAt(x, z) &&
+			isOpenAt(x + r, z) &&
+			isOpenAt(x - r, z) &&
+			isOpenAt(x, z + r) &&
+			isOpenAt(x, z - r) &&
+			isOpenAt(x + r * 0.7, z + r * 0.7) &&
+			isOpenAt(x - r * 0.7, z + r * 0.7) &&
+			isOpenAt(x + r * 0.7, z - r * 0.7) &&
+			isOpenAt(x - r * 0.7, z - r * 0.7)
+		);
+	}
+
+	function buildMazeScene() {
+		const floor = new THREE.Mesh(
+			new THREE.PlaneGeometry(MAZE_SIZE * CELL_SIZE, MAZE_SIZE * CELL_SIZE),
+			new THREE.MeshStandardMaterial({ color: 0xd7c8a5, roughness: 0.95, metalness: 0.02 })
+		);
+		floor.rotation.x = -Math.PI / 2;
+		floor.position.y = 0;
+		scene.add(floor);
+
+		const wallGeometry = new THREE.BoxGeometry(CELL_SIZE, WALL_HEIGHT, CELL_SIZE);
+		const wallMaterial = new THREE.MeshStandardMaterial({
+			color: 0xf4e8ce,
+			roughness: 0.75,
+			metalness: 0.05
+		});
+
+		for (let row = 0; row < MAZE_SIZE; row++) {
+			for (let col = 0; col < MAZE_SIZE; col++) {
+				if (maze[row][col] !== 1) continue;
+				const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+				const p = cellToWorld(col, row);
+				wall.position.set(p.x, WALL_HEIGHT * 0.5, p.z);
+				scene.add(wall);
+			}
+		}
+
+		const start = cellToWorld(1, 1);
+		camera.position.set(start.x, PLAYER_HEIGHT, start.z);
+
+		exitPosition = cellToWorld(MAZE_SIZE - 2, MAZE_SIZE - 2);
+		const exitMarker = new THREE.Mesh(
+			new THREE.CylinderGeometry(0.4, 0.7, 1.2, 16),
+			new THREE.MeshStandardMaterial({ color: 0x6cff99, emissive: 0x2f964f, emissiveIntensity: 1.15 })
+		);
+		exitMarker.position.set(exitPosition.x, 0.6, exitPosition.z);
+		scene.add(exitMarker);
+	}
+
+	function addSkyBackdrop() {
+		const sky = new THREE.Mesh(
+			new THREE.SphereGeometry(260, 48, 32),
+			new THREE.ShaderMaterial({
+				side: THREE.BackSide,
+				depthWrite: false,
+				uniforms: {
+					topColor: { value: new THREE.Color(0x61a3ff) },
+					horizonColor: { value: new THREE.Color(0xe8f5ff) },
+					bottomColor: { value: new THREE.Color(0xfff1d5) }
+				},
+				vertexShader: `
+					varying vec3 vWorldPosition;
+					void main() {
+						vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+						vWorldPosition = worldPosition.xyz;
+						gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+					}
+				`,
+				fragmentShader: `
+					uniform vec3 topColor;
+					uniform vec3 horizonColor;
+					uniform vec3 bottomColor;
+					varying vec3 vWorldPosition;
+					void main() {
+						float h = normalize(vWorldPosition).y;
+						float topMix = smoothstep(0.05, 0.95, h);
+						float groundMix = smoothstep(-1.0, -0.1, h);
+						vec3 color = mix(horizonColor, topColor, topMix);
+						color = mix(color, bottomColor, groundMix);
+						gl_FragColor = vec4(color, 1.0);
+					}
+				`
+			})
+		);
+		sky.position.y = -28;
+		scene.add(sky);
+
+		const moon = new THREE.Mesh(
+			new THREE.SphereGeometry(5.2, 24, 24),
+			new THREE.MeshStandardMaterial({
+				color: 0xfff7d6,
+				emissive: 0xffd26d,
+				emissiveIntensity: 0.35,
+				roughness: 0.62,
+				metalness: 0
+			})
+		);
+		moon.position.set(-44, 56, -28);
+		scene.add(moon);
+
+		const starCount = 220;
+		const starPositions = new Float32Array(starCount * 3);
+		for (let i = 0; i < starCount; i++) {
+			const angle = Math.random() * Math.PI * 2;
+			const distance = 42 + Math.random() * 156;
+			starPositions[i * 3] = Math.cos(angle) * distance;
+			starPositions[i * 3 + 1] = 28 + Math.random() * 112;
+			starPositions[i * 3 + 2] = Math.sin(angle) * distance;
+		}
+
+		const starGeometry = new THREE.BufferGeometry();
+		starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+		const stars = new THREE.Points(
+			starGeometry,
+			new THREE.PointsMaterial({
+				color: 0xffffff,
+				size: 1.35,
+				opacity: 0.82,
+				transparent: true,
+				sizeAttenuation: true
+			})
+		);
+		scene.add(stars);
+	}
+
+	function onKeyDown(event) {
+		switch (event.code) {
+			case 'ArrowUp':
+			case 'KeyW':
+				moveState.forward = true;
+				break;
+			case 'ArrowDown':
+			case 'KeyS':
+				moveState.backward = true;
+				break;
+			case 'ArrowLeft':
+			case 'KeyA':
+				moveState.left = true;
+				break;
+			case 'ArrowRight':
+			case 'KeyD':
+				moveState.right = true;
+				break;
+		}
+	}
+
+	function onKeyUp(event) {
+		switch (event.code) {
+			case 'ArrowUp':
+			case 'KeyW':
+				moveState.forward = false;
+				break;
+			case 'ArrowDown':
+			case 'KeyS':
+				moveState.backward = false;
+				break;
+			case 'ArrowLeft':
+			case 'KeyA':
+				moveState.left = false;
+				break;
+			case 'ArrowRight':
+			case 'KeyD':
+				moveState.right = false;
+				break;
+		}
+	}
+
+	function updateMovement(delta) {
+		velocity.x -= velocity.x * MOVE_DAMPING * delta;
+		velocity.z -= velocity.z * MOVE_DAMPING * delta;
+
+		camera.getWorldDirection(forward);
+		forward.y = 0;
+		forward.normalize();
+		right.crossVectors(forward, Y_AXIS).normalize();
+
+		moveIntent.set(0, 0, 0);
+		moveIntent.addScaledVector(forward, Number(moveState.forward) - Number(moveState.backward));
+		moveIntent.addScaledVector(right, Number(moveState.right) - Number(moveState.left));
+		if (moveIntent.lengthSq() > 0) moveIntent.normalize();
+
+		velocity.x += moveIntent.x * MOVE_ACCEL * delta;
+		velocity.z += moveIntent.z * MOVE_ACCEL * delta;
+
+		const nextX = camera.position.x + velocity.x * delta;
+		const nextZ = camera.position.z + velocity.z * delta;
+
+		if (canOccupy(nextX, camera.position.z)) {
+			camera.position.x = nextX;
+		} else {
+			velocity.x = 0;
+		}
+
+		if (canOccupy(camera.position.x, nextZ)) {
+			camera.position.z = nextZ;
+		} else {
+			velocity.z = 0;
+		}
+
+		camera.position.y = PLAYER_HEIGHT;
+	}
+
+	function updateUi() {
+		const { col, row } = worldToCell(camera.position.x, camera.position.z);
+		const exitDistance = camera.position.distanceTo(exitPosition);
+
+		debugEl.textContent = `Position: (${camera.position.x.toFixed(2)}, ${camera.position.z.toFixed(2)}) Cell: (${col}, ${row})`;
+		statusEl.textContent = exitDistance < FINISH_DISTANCE ? 'Exit reached. Press ESC to unlock and restart.' : 'Find the exit beacon.';
+	}
+
+	function animate() {
+		requestAnimationFrame(animate);
+		const delta = clock.getDelta();
+
+		if (controls.isLocked) {
+			updateMovement(delta);
+		}
+
+		updateUi();
+		renderer.render(scene, camera);
+	}
+
+	function init() {
+		const container = document.getElementById('canvas-container');
+		const startButton = document.getElementById('start-btn');
+		debugEl = document.getElementById('debug');
+		statusEl = document.getElementById('status');
+		instructionsEl = document.getElementById('instructions');
+
+		scene = new THREE.Scene();
+		scene.background = new THREE.Color(0xcbe5ff);
+		scene.fog = new THREE.Fog(0xcbe5ff, 90, 230);
+
+		camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 300);
+		renderer = new THREE.WebGLRenderer({ antialias: true });
+		renderer.toneMapping = THREE.ACESFilmicToneMapping;
+		renderer.toneMappingExposure = 1.08;
+		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+		renderer.setSize(window.innerWidth, window.innerHeight);
+		container.appendChild(renderer.domElement);
+
+		controls = new PointerLockControls(camera, document.body);
+		startButton.addEventListener('click', () => controls.lock());
+		controls.addEventListener('lock', () => {
+			instructionsEl.style.display = 'none';
+		});
+		controls.addEventListener('unlock', () => {
+			instructionsEl.style.display = 'block';
+		});
+
+		const hemi = new THREE.HemisphereLight(0xdff0ff, 0xc0a883, 1.3);
+		scene.add(hemi);
+
+		const dir = new THREE.DirectionalLight(0xffffff, 1.35);
+		dir.position.set(32, 58, 22);
+		scene.add(dir);
+
+		const fill = new THREE.DirectionalLight(0xffe5bf, 0.55);
+		fill.position.set(-30, 22, -34);
+		scene.add(fill);
+
+		maze = createMaze(MAZE_SIZE);
+		addSkyBackdrop();
+		buildMazeScene();
+
+		document.addEventListener('keydown', onKeyDown);
+		document.addEventListener('keyup', onKeyUp);
+
+		clock = new THREE.Clock();
+		animate();
+	}
+
+	window.addEventListener('resize', () => {
+		camera.aspect = window.innerWidth / window.innerHeight;
+		camera.updateProjectionMatrix();
+		renderer.setSize(window.innerWidth, window.innerHeight);
+	});
+
+	init();
+</script>
