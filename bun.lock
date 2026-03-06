@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "maze-fractal",
+      "name": "space-maze",
       "dependencies": {
         "astro": "^5.17.1",
         "three": "^0.183.2",
