@@ -9,7 +9,9 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "astro": "astro"
+    "astro": "astro",
+    "deploy": "bun run build && bunx wrangler pages deploy dist --project-name space-maze",
+    "deploy:production": "bun run build && bunx wrangler pages deploy dist --project-name space-maze"
   },
   "dependencies": {
     "astro": "^5.18.0",
