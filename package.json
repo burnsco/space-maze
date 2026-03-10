@@ -7,8 +7,6 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
-    "deploy": "bun run build && wrangler pages deploy dist --project-name space-maze",
-    "deploy:production": "bun run build && wrangler pages deploy dist --project-name space-maze --branch production",
     "preview": "astro preview",
     "check": "astro check",
     "astro": "astro"
@@ -19,8 +17,6 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.6",
-    "@astrojs/cloudflare": "^12.6.12",
-    "typescript": "^5.9.3",
-    "wrangler": "^4.71.0"
+    "typescript": "^5.9.3"
   }
 }
