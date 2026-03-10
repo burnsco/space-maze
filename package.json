@@ -11,14 +11,27 @@
     "check": "astro check",
     "astro": "astro",
     "deploy": "bun run build && bunx wrangler pages deploy dist --project-name space-maze",
-    "deploy:production": "bun run build && bunx wrangler pages deploy dist --project-name space-maze"
+    "deploy:production": "bun run build && bunx wrangler pages deploy dist --project-name space-maze",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "prepare": "husky"
   },
   "dependencies": {
-    "astro": "^5.18.0",
+    "astro": "^6.0.1",
     "three": "^0.183.2"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.6",
-    "typescript": "^5.9.3"
+    "@astrojs/check": "^0.9.7",
+    "typescript": "^5.9.3",
+    "oxlint": "^1.52.0",
+    "oxfmt": "^0.37.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.3.3"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "oxlint --fix",
+      "oxfmt"
+    ]
   }
 }
