@@ -42,16 +42,19 @@ This project is deployed at [space-maze.coreyburns.ca](https://space-maze.coreyb
 ### 🚀 Deployment
 
 Build locally with:
+
 ```bash
 bun run build
 ```
 
 Deploy to Cloudflare Pages with:
+
 ```bash
 bun run deploy
 ```
 
 If you need to target the production branch explicitly:
+
 ```bash
 bun run deploy:production
 ```
