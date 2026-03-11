@@ -9,7 +9,7 @@
     "preview": "astro preview",
     "check": "astro check",
     "astro": "astro",
-    "deploy": "npx wrangler deploy",
+    "deploy": "bun run build && npx wrangler deploy",
     "deploy:dry-run": "npx wrangler deploy --dry-run",
     "lint": "oxlint",
     "format": "oxfmt",
