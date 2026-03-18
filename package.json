@@ -11,6 +11,7 @@
     "astro": "astro",
     "deploy": "bun run build && npx wrangler deploy",
     "deploy:dry-run": "npx wrangler deploy --dry-run",
+    "cf:status": "../scripts/cf-portfolio.sh status space-maze",
     "lint": "oxlint",
     "format": "oxfmt",
     "prepare": "husky",
