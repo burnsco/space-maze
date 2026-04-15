@@ -6,34 +6,20 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
-    "preview": "astro preview",
+    "preview": "bun run build && wrangler dev",
     "check": "astro check",
     "astro": "astro",
-    "deploy": "bun run build && npx wrangler deploy",
-    "deploy:dry-run": "npx wrangler deploy --dry-run",
-    "cf:status": "../scripts/cf-portfolio.sh status space-maze",
-    "lint": "oxlint",
-    "format": "oxfmt",
-    "prepare": "husky",
-    "lint:fix": "oxlint --fix . && oxfmt"
+    "deploy": "bun run build && wrangler deploy",
+    "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "astro": "^6.1.5",
-    "three": "^0.183.2"
+    "@astrojs/cloudflare": "^12.6.13",
+    "astro": "^5.18.1",
+    "three": "^0.183.2",
+    "wrangler": "^4.83.0"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.8",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.4.0",
-    "oxfmt": "^0.44.0",
-    "oxlint": "^1.59.0",
-    "typescript": "^6.0.2"
-  },
-  "lint-staged": {
-    "*.{js,jsx,ts,tsx}": [
-      "oxlint --fix",
-      "oxfmt"
-    ]
-  },
-  "packageManager": "bun@1.3.11"
+    "typescript": "^5.9.3"
+  }
 }
