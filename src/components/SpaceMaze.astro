@@ -14,11 +14,18 @@
 	</div>
 	<button id="start-btn">ENTER MAZE</button>
 </div>
+<div id="win-screen" style="display:none">
+	<div class="title">YOU ESCAPED</div>
+	<div id="win-time" class="win-stat"></div>
+	<button id="play-again-btn">PLAY AGAIN</button>
+</div>
 <div id="ui">
 	<div id="status">Reach level 5 and find the exit beacon.</div>
 	<div id="health">Hits: 0/3</div>
+	<div id="timer">Time: 0:00</div>
 	<div id="debug">Position: (0.00, 0.00)</div>
 </div>
+<button id="mute-btn" title="Toggle music">♪</button>
 
 <style>
 	#canvas-container {
@@ -80,6 +87,75 @@
 		border-radius: 8px;
 		padding: 0.65rem 0.8rem;
 		pointer-events: none;
+	}
+
+	#win-screen {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		text-align: center;
+		background: rgba(7, 16, 34, 0.92);
+		padding: 2.5rem 3rem;
+		border: 1px solid #4fffb0;
+		border-radius: 10px;
+		z-index: 100;
+		pointer-events: auto;
+	}
+
+	#win-screen .title {
+		color: #4fffb0;
+		text-shadow: 0 0 18px #4fffb0aa;
+	}
+
+	.win-stat {
+		font-size: 1.4rem;
+		color: #a9d9ff;
+		margin: 1rem 0 1.8rem;
+		font-family: monospace;
+	}
+
+	#play-again-btn {
+		background: transparent;
+		color: #4fffb0;
+		border: 2px solid #4fffb0;
+		padding: 1rem 2rem;
+		font-size: 1.2rem;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	#play-again-btn:hover {
+		background: #4fffb0;
+		color: #020409;
+	}
+
+	#mute-btn {
+		position: fixed;
+		top: 16px;
+		right: 16px;
+		background: rgba(11, 21, 45, 0.78);
+		color: #8fd0ff;
+		border: 1px solid rgba(122, 178, 230, 0.45);
+		border-radius: 8px;
+		width: 2.4rem;
+		height: 2.4rem;
+		font-size: 1.1rem;
+		cursor: pointer;
+		z-index: 200;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: background 0.15s ease, color 0.15s ease;
+	}
+
+	#mute-btn:hover {
+		background: rgba(143, 208, 255, 0.18);
+	}
+
+	#mute-btn.muted {
+		color: #4a6a88;
+		border-color: rgba(74, 106, 136, 0.45);
 	}
 </style>
 
@@ -194,6 +270,9 @@
 	let playerHits = 0;
 	let playerHitCooldown = 0;
 	let gameOver = false;
+	let gameWon = false;
+	let runStartTime = 0;
+	let musicMuted = false;
 	const projectileDirection = new THREE.Vector3();
 	const activeProjectiles = [];
 	const projectileGeometry = new THREE.SphereGeometry(PROJECTILE_RADIUS, 12, 12);
@@ -214,8 +293,13 @@
 	let debugEl;
 	let statusEl;
 	let healthEl;
+	let timerEl;
 	let instructionsEl;
 	let startButtonEl;
+	let winScreenEl;
+	let winTimeEl;
+	let playAgainBtnEl;
+	let muteBtnEl;
 
 	function createEnemyRuntime(height) {
 		return {
@@ -701,6 +785,70 @@
 		return xRegion + zRegion;
 	}
 
+	// Per-level visual themes: sections=[NW,NE,SW,SE], sky=[top,horizon,bottom], fog, planet
+	const LEVEL_THEMES = [
+		{
+			// Level 1 — Deep Space (blue/indigo)
+			sections: [
+				{ floor: 0x37426b, wall: 0x7e96cf, edge: 0x95b7ff },
+				{ floor: 0x304b63, wall: 0x72b3d4, edge: 0x79e1ff },
+				{ floor: 0x4a3b68, wall: 0x9d86cc, edge: 0xc39cff },
+				{ floor: 0x2f4d56, wall: 0x71b8ba, edge: 0x75e6d5 }
+			],
+			skyTop: 0x16388f, skyHorizon: 0x2a569f, skyBottom: 0x0f1736,
+			fog: 0x132144, planetColor: 0x97b9ff, planetEmissive: 0x2f5baf,
+			wallHeight: 3.4
+		},
+		{
+			// Level 2 — Crimson Nebula (red/rust)
+			sections: [
+				{ floor: 0x4a1f1f, wall: 0xb06060, edge: 0xff8080 },
+				{ floor: 0x3d1818, wall: 0xa05050, edge: 0xff6a6a },
+				{ floor: 0x522222, wall: 0xbf7070, edge: 0xff9999 },
+				{ floor: 0x3c2010, wall: 0xa06040, edge: 0xff8050 }
+			],
+			skyTop: 0x6e1a1a, skyHorizon: 0x8f3030, skyBottom: 0x160606,
+			fog: 0x1e0808, planetColor: 0xff7a6a, planetEmissive: 0x8a2510,
+			wallHeight: 3.4
+		},
+		{
+			// Level 3 — Toxic Bog (green/acid)
+			sections: [
+				{ floor: 0x1a3a1a, wall: 0x50a050, edge: 0x6fff6f },
+				{ floor: 0x1c3c1a, wall: 0x5ab05a, edge: 0x80ff80 },
+				{ floor: 0x223322, wall: 0x5c9c5c, edge: 0x78e878 },
+				{ floor: 0x283818, wall: 0x6aac40, edge: 0x9aff50 }
+			],
+			skyTop: 0x0d2e12, skyHorizon: 0x1a4a20, skyBottom: 0x060e06,
+			fog: 0x091408, planetColor: 0x72e872, planetEmissive: 0x1a6a1a,
+			wallHeight: 3.4
+		},
+		{
+			// Level 4 — Void Purple (deep purple/violet)
+			sections: [
+				{ floor: 0x2d1845, wall: 0x8060c0, edge: 0xc090ff },
+				{ floor: 0x28163c, wall: 0x7050b8, edge: 0xb07eff },
+				{ floor: 0x3a1850, wall: 0x9070cc, edge: 0xd0a0ff },
+				{ floor: 0x241438, wall: 0x6848aa, edge: 0xa878f0 }
+			],
+			skyTop: 0x1a0a38, skyHorizon: 0x360a5a, skyBottom: 0x080210,
+			fog: 0x100820, planetColor: 0xd090ff, planetEmissive: 0x5020a0,
+			wallHeight: 3.4
+		},
+		{
+			// Level 5 — Ember Core (gold/amber — final level)
+			sections: [
+				{ floor: 0x3a2800, wall: 0xc09040, edge: 0xffd060 },
+				{ floor: 0x2e2000, wall: 0xb08030, edge: 0xffba40 },
+				{ floor: 0x3c2c08, wall: 0xcc9c48, edge: 0xffe070 },
+				{ floor: 0x301c00, wall: 0xb07020, edge: 0xff9820 }
+			],
+			skyTop: 0x2a1200, skyHorizon: 0x4a2200, skyBottom: 0x0e0600,
+			fog: 0x1a0c00, planetColor: 0xffc060, planetEmissive: 0x8a4000,
+			wallHeight: 3.4
+		}
+	];
+
 	function buildMazeScene(levelIndex) {
 		if (mazeGroup) scene.remove(mazeGroup);
 		regionPulseMaterials.length = 0;
@@ -708,26 +856,28 @@
 
 		mazeGroup = new THREE.Group();
 		const levelData = levels[levelIndex];
-		const isLowerLevel = levelIndex === EXIT_LEVEL;
 		levelData.wallMeshes = new Map();
+		const theme = LEVEL_THEMES[Math.min(levelIndex, LEVEL_THEMES.length - 1)];
+
+		// Update sky, fog, and planet to match the level theme
+		if (skyMaterial) {
+			skyMaterial.uniforms.topColor.value.setHex(theme.skyTop);
+			skyMaterial.uniforms.horizonColor.value.setHex(theme.skyHorizon);
+			skyMaterial.uniforms.bottomColor.value.setHex(theme.skyBottom);
+		}
+		scene.fog.color.setHex(theme.fog);
+		scene.background.setHex(theme.fog);
+		if (planetMesh) {
+			planetMesh.material.color.setHex(theme.planetColor);
+			planetMesh.material.emissive.setHex(theme.planetEmissive);
+		}
+
 		const worldSize = MAZE_SIZE * CELL_SIZE;
 		const sectionSize = worldSize / 2;
 		const sectionOffset = worldSize * 0.25;
 		const floorTexture = getTexture(levelData.floorTextureUrl, sectionSize / CELL_SIZE, sectionSize / CELL_SIZE);
 		const wallTexture = getTexture(levelData.wallTextureUrl, 1, 1);
-		const sectionConfigs = isLowerLevel
-			? [
-					{ floor: 0x3a415a, wall: 0x8f9ebc, edge: 0x9fc0ff },
-					{ floor: 0x354857, wall: 0x84b4c2, edge: 0x8ee2ff },
-					{ floor: 0x463d5d, wall: 0xa495d3, edge: 0xc8adff },
-					{ floor: 0x3b4d4e, wall: 0x8fc2b6, edge: 0x91f2d6 }
-				]
-			: [
-					{ floor: 0x37426b, wall: 0x7e96cf, edge: 0x95b7ff },
-					{ floor: 0x304b63, wall: 0x72b3d4, edge: 0x79e1ff },
-					{ floor: 0x4a3b68, wall: 0x9d86cc, edge: 0xc39cff },
-					{ floor: 0x2f4d56, wall: 0x71b8ba, edge: 0x75e6d5 }
-				];
+		const sectionConfigs = theme.sections;
 
 		const floorGeometry = new THREE.PlaneGeometry(sectionSize, sectionSize);
 		for (let rowSection = 0; rowSection < 2; rowSection++) {
@@ -1235,11 +1385,28 @@
 		activeProjectiles.length = 0;
 	}
 
+	function formatTime(seconds) {
+		const m = Math.floor(seconds / 60);
+		const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+		return `${m}:${s}`;
+	}
+
 	function endGame() {
 		gameOver = true;
 		clearProjectiles();
 		statusEl.textContent = 'Game over. The fox and face got you. Press ENTER MAZE to restart.';
 		startButtonEl.textContent = 'ENTER MAZE';
+		if (controls?.isLocked) controls.unlock();
+		setMusicPlaying(false);
+	}
+
+	function triggerWin() {
+		if (gameWon) return;
+		gameWon = true;
+		clearProjectiles();
+		const elapsed = (performance.now() - runStartTime) / 1000;
+		winTimeEl.textContent = `Completed in ${formatTime(elapsed)}`;
+		winScreenEl.style.display = 'block';
 		if (controls?.isLocked) controls.unlock();
 		setMusicPlaying(false);
 	}
@@ -1415,10 +1582,13 @@
 
 	function resetRun() {
 		gameOver = false;
+		gameWon = false;
+		runStartTime = 0;
 		playerHits = 0;
 		playerHitCooldown = 0;
 		foxEnemy.catchCooldown = 0;
 		faceEnemy.shootTimer = FACE_SHOOT_INTERVAL;
+		if (winScreenEl) winScreenEl.style.display = 'none';
 		clearProjectiles();
 		buildLevels();
 		preloadLevelTextures();
@@ -1570,6 +1740,9 @@
 			? Math.hypot(camera.position.x - exitPosition.x, camera.position.z - exitPosition.z)
 			: Infinity;
 
+		const elapsed = runStartTime > 0 ? (performance.now() - runStartTime) / 1000 : 0;
+		timerEl.textContent = `Time: ${formatTime(elapsed)}`;
+
 		debugEl.textContent = `Level: ${currentLevel + 1}/${LEVEL_COUNT} | Position: (${camera.position.x.toFixed(2)}, ${camera.position.z.toFixed(2)}) Cell: (${col}, ${row})`;
 		healthEl.textContent = `Hits: ${playerHits}/${PLAYER_MAX_HITS}`;
 
@@ -1579,13 +1752,10 @@
 			return;
 		}
 
-		if (gameOver) {
-			statusEl.textContent = 'Game over. Press ENTER MAZE to restart.';
-			return;
-		}
+		if (gameOver || gameWon) return;
 
 		if (exitDistance < FINISH_DISTANCE) {
-			statusEl.textContent = 'Exit reached. Press ESC to unlock and restart.';
+			triggerWin();
 			return;
 		}
 
@@ -1677,7 +1847,12 @@
 		debugEl = document.getElementById('debug');
 		statusEl = document.getElementById('status');
 		healthEl = document.getElementById('health');
+		timerEl = document.getElementById('timer');
 		instructionsEl = document.getElementById('instructions');
+		winScreenEl = document.getElementById('win-screen');
+		winTimeEl = document.getElementById('win-time');
+		playAgainBtnEl = document.getElementById('play-again-btn');
+		muteBtnEl = document.getElementById('mute-btn');
 
 		scene = new THREE.Scene();
 		scene.background = new THREE.Color(0x132144);
@@ -1716,12 +1891,28 @@
 			}
 			controls.lock();
 		});
+		playAgainBtnEl.addEventListener('click', () => {
+			resetRun();
+			if (!musicReady) {
+				music.load();
+				musicReady = true;
+			}
+			controls.lock();
+		});
+		muteBtnEl.addEventListener('click', () => {
+			musicMuted = !musicMuted;
+			music.muted = musicMuted;
+			muteBtnEl.textContent = musicMuted ? '🔇' : '♪';
+			muteBtnEl.classList.toggle('muted', musicMuted);
+		});
 		controls.addEventListener('lock', () => {
 			instructionsEl.style.display = 'none';
-			setMusicPlaying(true);
+			winScreenEl.style.display = 'none';
+			if (runStartTime === 0) runStartTime = performance.now();
+			if (!musicMuted) setMusicPlaying(true);
 		});
 		controls.addEventListener('unlock', () => {
-			instructionsEl.style.display = 'block';
+			if (!gameWon) instructionsEl.style.display = 'block';
 			setMusicPlaying(false);
 		});
 
