@@ -25,6 +25,8 @@
 	<div id="timer">Time: 0:00</div>
 	<div id="debug">Position: (0.00, 0.00)</div>
 </div>
+<div id="crosshair" aria-hidden="true"></div>
+<div id="damage-flash" aria-hidden="true"></div>
 <button id="mute-btn" title="Toggle music">♪</button>
 
 <style>
@@ -34,18 +36,35 @@
 		background: radial-gradient(circle at 50% 12%, #2f4c79 0%, #13213f 58%, #070c1a 100%);
 	}
 
+	#canvas-container::after {
+		content: '';
+		position: fixed;
+		inset: 0;
+		pointer-events: none;
+		background:
+			linear-gradient(rgba(255, 255, 255, 0.025) 50%, rgba(0, 0, 0, 0.045) 50%) 0 0 / 100% 4px,
+			radial-gradient(circle at 50% 50%, transparent 0%, transparent 58%, rgba(0, 0, 0, 0.42) 100%);
+		mix-blend-mode: screen;
+		opacity: 0.45;
+		z-index: 8;
+	}
+
 	#instructions {
 		position: absolute;
 		top: 50%;
 		left: 50%;
 		transform: translate(-50%, -50%);
 		text-align: center;
-		background: rgba(7, 16, 34, 0.86);
-		padding: 2rem;
-		border: 1px solid #7cc2ff;
-		border-radius: 10px;
+		background:
+			linear-gradient(145deg, rgba(7, 16, 34, 0.92), rgba(12, 38, 64, 0.82)),
+			radial-gradient(circle at 10% 0%, rgba(126, 207, 255, 0.3), transparent 34%);
+		padding: 2rem 2.35rem;
+		border: 1px solid rgba(124, 194, 255, 0.78);
+		border-radius: 16px;
+		box-shadow: 0 0 48px rgba(70, 166, 255, 0.24), inset 0 0 28px rgba(124, 194, 255, 0.08);
 		z-index: 100;
 		pointer-events: auto;
+		backdrop-filter: blur(14px);
 	}
 
 	.title {
@@ -54,6 +73,7 @@
 		color: #a9d9ff;
 		margin-bottom: 1rem;
 		letter-spacing: 0.14rem;
+		text-shadow: 0 0 22px rgba(124, 194, 255, 0.68);
 	}
 
 	.controls {
@@ -62,13 +82,15 @@
 	}
 
 	#start-btn {
-		background: transparent;
+		background: linear-gradient(90deg, rgba(143, 208, 255, 0.08), rgba(79, 255, 176, 0.08));
 		color: #8fd0ff;
 		border: 2px solid #8fd0ff;
 		padding: 1rem 2rem;
 		font-size: 1.2rem;
 		cursor: pointer;
 		transition: all 0.2s ease;
+		border-radius: 999px;
+		box-shadow: 0 0 24px rgba(143, 208, 255, 0.22);
 	}
 
 	#start-btn:hover {
@@ -87,6 +109,57 @@
 		border-radius: 8px;
 		padding: 0.65rem 0.8rem;
 		pointer-events: none;
+		z-index: 30;
+		box-shadow: 0 0 26px rgba(25, 96, 170, 0.18);
+	}
+
+	#crosshair {
+		position: fixed;
+		left: 50%;
+		top: 50%;
+		width: 18px;
+		height: 18px;
+		transform: translate(-50%, -50%);
+		pointer-events: none;
+		z-index: 25;
+		opacity: 0.8;
+	}
+
+	#crosshair::before,
+	#crosshair::after {
+		content: '';
+		position: absolute;
+		background: rgba(191, 241, 255, 0.92);
+		box-shadow: 0 0 10px rgba(143, 208, 255, 0.9);
+	}
+
+	#crosshair::before {
+		left: 8px;
+		top: 0;
+		width: 2px;
+		height: 18px;
+	}
+
+	#crosshair::after {
+		left: 0;
+		top: 8px;
+		width: 18px;
+		height: 2px;
+	}
+
+	#damage-flash {
+		position: fixed;
+		inset: 0;
+		background: radial-gradient(circle, transparent 32%, rgba(255, 55, 40, 0.42) 100%);
+		opacity: 0;
+		pointer-events: none;
+		z-index: 26;
+		transition: opacity 0.24s ease;
+	}
+
+	#damage-flash.active {
+		opacity: 1;
+		transition-duration: 0.04s;
 	}
 
 	#win-screen {
@@ -300,6 +373,7 @@
 	let winTimeEl;
 	let playAgainBtnEl;
 	let muteBtnEl;
+	let damageFlashEl;
 
 	function createEnemyRuntime(height) {
 		return {
@@ -850,7 +924,10 @@
 	];
 
 	function buildMazeScene(levelIndex) {
-		if (mazeGroup) scene.remove(mazeGroup);
+		if (mazeGroup) {
+			scene.remove(mazeGroup);
+			disposeObject3D(mazeGroup);
+		}
 		regionPulseMaterials.length = 0;
 		transitionSphereMeshes.length = 0;
 
@@ -1026,7 +1103,7 @@
 			}
 		}
 
-		if (isLowerLevel) {
+		if (levelIndex === EXIT_LEVEL) {
 			const exitMarker = new THREE.Mesh(
 				new THREE.CylinderGeometry(0.42, 0.72, 1.28, 16),
 				new THREE.MeshStandardMaterial({
@@ -1037,9 +1114,46 @@
 			);
 			exitMarker.position.set(exitPosition.x, 0.64, exitPosition.z);
 			mazeGroup.add(exitMarker);
+
+			const beaconLight = new THREE.PointLight(0x76ffac, 5.4, CELL_SIZE * 6.5, 1.8);
+			beaconLight.position.set(exitPosition.x, 2.2, exitPosition.z);
+			mazeGroup.add(beaconLight);
+
+			const beaconRingMaterial = new THREE.MeshBasicMaterial({
+				color: 0x91ffc2,
+				transparent: true,
+				opacity: 0.42,
+				side: THREE.DoubleSide
+			});
+			for (let i = 0; i < 3; i++) {
+				const ring = new THREE.Mesh(
+					new THREE.TorusGeometry(0.95 + i * 0.34, 0.025, 8, 44),
+					beaconRingMaterial.clone()
+				);
+				ring.position.set(exitPosition.x, 0.24 + i * 0.32, exitPosition.z);
+				ring.rotation.x = Math.PI / 2;
+				mazeGroup.add(ring);
+				transitionSphereMeshes.push({
+					orb: ring,
+					aura: ring,
+					baseY: ring.position.y,
+					phase: i * 1.8
+				});
+			}
 		}
 
 		scene.add(mazeGroup);
+	}
+
+	function disposeObject3D(root) {
+		root.traverse((object) => {
+			if (object.geometry) object.geometry.dispose();
+			const materials = Array.isArray(object.material) ? object.material : [object.material];
+			for (const material of materials) {
+				if (!material) continue;
+				material.dispose();
+			}
+		});
 	}
 
 	function createStarField(count, minRadius, maxRadius, size, color, opacity) {
@@ -1415,6 +1529,7 @@
 		if (gameOver || playerHitCooldown > 0) return false;
 		playerHitCooldown = PLAYER_HIT_COOLDOWN;
 		playerHits++;
+		flashDamage();
 		if (playerHits >= PLAYER_MAX_HITS) {
 			endGame();
 			return true;
@@ -1427,6 +1542,15 @@
 		}
 		statusEl.textContent = `You were hit (${playerHits}/${PLAYER_MAX_HITS}).`;
 		return true;
+	}
+
+	function flashDamage() {
+		if (!damageFlashEl) return;
+		damageFlashEl.classList.remove('active');
+		requestAnimationFrame(() => {
+			damageFlashEl.classList.add('active');
+			window.setTimeout(() => damageFlashEl?.classList.remove('active'), 90);
+		});
 	}
 
 	function spawnFaceProjectile() {
@@ -1817,7 +1941,7 @@
 
 	function animate() {
 		requestAnimationFrame(animate);
-		const delta = clock.getDelta();
+		const delta = Math.min(clock.getDelta(), 0.05);
 		const elapsedTime = clock.elapsedTime;
 		if (playerHitCooldown > 0) playerHitCooldown = Math.max(0, playerHitCooldown - delta);
 
@@ -1853,13 +1977,14 @@
 		winTimeEl = document.getElementById('win-time');
 		playAgainBtnEl = document.getElementById('play-again-btn');
 		muteBtnEl = document.getElementById('mute-btn');
+		damageFlashEl = document.getElementById('damage-flash');
 
 		scene = new THREE.Scene();
 		scene.background = new THREE.Color(0x132144);
 		scene.fog = new THREE.Fog(0x132144, 76, 240);
 
 		camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 300);
-		renderer = new THREE.WebGLRenderer({ antialias: true });
+		renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 		renderer.toneMapping = THREE.ACESFilmicToneMapping;
 		renderer.toneMappingExposure = 1.24;
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
